@@ -3,7 +3,10 @@ import hmac
 import json
 import os
 import re
+import tempfile
 import time
+from functools import lru_cache
+from pathlib import Path
 
 import mysql.connector
 from env_loader import load_project_env
@@ -23,9 +26,63 @@ DB_CONNECTION_TIMEOUT = int(os.getenv("DB_CONNECTION_TIMEOUT", "5"))
 PASSWORD_ITERATIONS = 100_000
 
 
+def _env_flag(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _looks_like_pem(value):
+    return "-----BEGIN" in value
+
+
+@lru_cache(maxsize=None)
+def _materialize_secret_file(prefix, value):
+    if not value:
+        return None
+
+    if not _looks_like_pem(value):
+        return value
+
+    secret_dir = Path(tempfile.gettempdir()) / "ai_text_to_sql_secrets"
+    secret_dir.mkdir(parents=True, exist_ok=True)
+
+    secret_hash = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    secret_path = secret_dir / f"{prefix}_{secret_hash}.pem"
+    secret_path.write_text(value, encoding="utf-8")
+    return str(secret_path)
+
+
+def _build_ssl_config():
+    if _env_flag("DB_SSL_DISABLED", default=False):
+        return {}
+
+    ssl_ca = _materialize_secret_file("db_ssl_ca", os.getenv("DB_SSL_CA", "").strip())
+    ssl_cert = _materialize_secret_file("db_ssl_cert", os.getenv("DB_SSL_CERT", "").strip())
+    ssl_key = _materialize_secret_file("db_ssl_key", os.getenv("DB_SSL_KEY", "").strip())
+
+    ssl_config = {}
+    if ssl_ca:
+        ssl_config["ssl_ca"] = ssl_ca
+    if ssl_cert:
+        ssl_config["ssl_cert"] = ssl_cert
+    if ssl_key:
+        ssl_config["ssl_key"] = ssl_key
+
+    if ssl_config:
+        ssl_config["ssl_verify_cert"] = _env_flag("DB_SSL_VERIFY_CERT", default=True)
+
+    return ssl_config
+
+
+DB_SSL_CONFIG = _build_ssl_config()
+
+
 def get_connection():
     return mysql.connector.connect(
         **DB_CONFIG,
+        **DB_SSL_CONFIG,
         connection_timeout=DB_CONNECTION_TIMEOUT,
     )
 
@@ -35,6 +92,7 @@ def get_server_connection():
     server_config.pop("database", None)
     return mysql.connector.connect(
         **server_config,
+        **DB_SSL_CONFIG,
         connection_timeout=DB_CONNECTION_TIMEOUT,
     )
 
