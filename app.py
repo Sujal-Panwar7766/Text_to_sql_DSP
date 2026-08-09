@@ -16,7 +16,7 @@ from ai_query import (
     generate_sql,
     generate_table_insights,
 )
-from db_saas import (
+from db import (
     initialize_database,
     authenticate_user,
     create_user,
