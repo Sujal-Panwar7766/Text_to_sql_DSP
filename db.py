@@ -1,3 +1,7 @@
+"""
+Enhanced database schema and operations for SaaS platform
+Manages conversations, messages, and query history per user
+"""
 import hashlib
 import hmac
 import json
@@ -5,44 +9,114 @@ import os
 import re
 import sqlite3
 import time
+from datetime import datetime
 from pathlib import Path
 
 from env_loader import load_project_env
 
 load_project_env()
 
-# SQLite database file (stored in current directory)
 DB_PATH = "app_data.db"
-
 PASSWORD_ITERATIONS = 100_000
 
 
 def get_connection():
     """Get SQLite connection"""
     conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row  # Return rows as dictionaries
+    conn.row_factory = sqlite3.Row
     return conn
 
 
-def ensure_users_table():
-    """Create users and workspaces tables if they don't exist"""
+def initialize_database():
+    """Create all necessary tables for SaaS platform"""
     conn = get_connection()
     cursor = conn.cursor()
     
+    # Users table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             full_name TEXT NOT NULL,
             email TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_login TIMESTAMP,
+            is_active BOOLEAN DEFAULT 1
         )
     """)
     
+    # Conversations table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_archived BOOLEAN DEFAULT 0,
+            message_count INTEGER DEFAULT 0,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+    
+    # Messages table (chat history)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            role TEXT NOT NULL,  -- 'user' or 'assistant'
+            content TEXT NOT NULL,
+            query_sql TEXT,  -- SQL query if applicable
+            result_json TEXT,  -- JSON results if applicable
+            result_row_count INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+    
+    # Query history table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS query_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            conversation_id INTEGER,
+            table_names TEXT,  -- JSON array of table names
+            question TEXT,
+            query_sql TEXT,
+            result_row_count INTEGER,
+            execution_time_ms REAL,
+            success BOOLEAN DEFAULT 1,
+            error_message TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE SET NULL
+        )
+    """)
+    
+    # Tables metadata table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_tables (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            table_name TEXT NOT NULL,
+            source_filename TEXT,
+            row_count INTEGER,
+            column_count INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+    
+    # User workspace (settings, theme, etc)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_workspaces (
             user_id INTEGER PRIMARY KEY,
             workspace_json TEXT NOT NULL,
+            theme TEXT DEFAULT 'Dark',
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
@@ -51,6 +125,8 @@ def ensure_users_table():
     conn.commit()
     conn.close()
 
+
+# ==================== USER MANAGEMENT ====================
 
 def normalize_email(email):
     return email.strip().lower()
@@ -91,8 +167,7 @@ def create_user(full_name, email, password):
     cursor = conn.cursor()
 
     cursor.execute("SELECT id FROM users WHERE email = ?", (normalized_email,))
-    existing_user = cursor.fetchone()
-    if existing_user:
+    if cursor.fetchone():
         conn.close()
         return None, "An account with this email already exists."
 
@@ -107,15 +182,23 @@ def create_user(full_name, email, password):
     conn.commit()
 
     user_id = cursor.lastrowid
-    conn.close()
-    return (
-        {
-            "id": user_id,
-            "full_name": full_name.strip(),
-            "email": normalized_email,
-        },
-        None,
+    
+    # Create default workspace
+    cursor.execute(
+        """
+        INSERT INTO user_workspaces (user_id, workspace_json, theme)
+        VALUES (?, ?, ?)
+        """,
+        (user_id, json.dumps({}), "Dark"),
     )
+    conn.commit()
+    conn.close()
+    
+    return {
+        "id": user_id,
+        "full_name": full_name.strip(),
+        "email": normalized_email,
+    }, None
 
 
 def authenticate_user(email, password):
@@ -131,10 +214,18 @@ def authenticate_user(email, password):
         (normalized_email,),
     )
     user = cursor.fetchone()
-    conn.close()
 
     if not user or not verify_password(password, user["password_hash"]):
+        conn.close()
         return None
+
+    # Update last login
+    cursor.execute(
+        "UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?",
+        (user["id"],),
+    )
+    conn.commit()
+    conn.close()
 
     return {
         "id": user["id"],
@@ -142,6 +233,239 @@ def authenticate_user(email, password):
         "email": user["email"],
     }
 
+
+# ==================== CONVERSATION MANAGEMENT ====================
+
+def create_conversation(user_id, title="New Conversation", description=""):
+    """Create a new conversation for the user"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        """
+        INSERT INTO conversations (user_id, title, description)
+        VALUES (?, ?, ?)
+        """,
+        (user_id, title, description),
+    )
+    conn.commit()
+    conversation_id = cursor.lastrowid
+    conn.close()
+    
+    return conversation_id
+
+
+def get_user_conversations(user_id, limit=50, offset=0, archived=False):
+    """Get all conversations for a user"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        """
+        SELECT id, title, description, created_at, updated_at, message_count
+        FROM conversations
+        WHERE user_id = ? AND is_archived = ?
+        ORDER BY updated_at DESC
+        LIMIT ? OFFSET ?
+        """,
+        (user_id, 1 if archived else 0, limit, offset),
+    )
+    conversations = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    
+    return conversations
+
+
+def get_conversation(conversation_id, user_id):
+    """Get a specific conversation"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        """
+        SELECT id, user_id, title, description, created_at, updated_at, message_count
+        FROM conversations
+        WHERE id = ? AND user_id = ?
+        """,
+        (conversation_id, user_id),
+    )
+    conversation = cursor.fetchone()
+    conn.close()
+    
+    return dict(conversation) if conversation else None
+
+
+def update_conversation(conversation_id, user_id, title=None, description=None):
+    """Update conversation title/description"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    if title:
+        cursor.execute(
+            """
+            UPDATE conversations
+            SET title = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND user_id = ?
+            """,
+            (title, conversation_id, user_id),
+        )
+    
+    if description is not None:
+        cursor.execute(
+            """
+            UPDATE conversations
+            SET description = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND user_id = ?
+            """,
+            (description, conversation_id, user_id),
+        )
+    
+    conn.commit()
+    conn.close()
+
+
+def delete_conversation(conversation_id, user_id):
+    """Delete a conversation (soft delete via archive)"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        """
+        UPDATE conversations
+        SET is_archived = 1, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND user_id = ?
+        """,
+        (conversation_id, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def search_conversations(user_id, query, limit=20):
+    """Search conversations by title"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    search_query = f"%{query.lower()}%"
+    cursor.execute(
+        """
+        SELECT id, title, description, created_at, updated_at, message_count
+        FROM conversations
+        WHERE user_id = ? AND is_archived = 0 AND LOWER(title) LIKE ?
+        ORDER BY updated_at DESC
+        LIMIT ?
+        """,
+        (user_id, search_query, limit),
+    )
+    conversations = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    
+    return conversations
+
+
+# ==================== MESSAGE MANAGEMENT ====================
+
+def add_message(conversation_id, user_id, role, content, query_sql=None, result_json=None, row_count=None):
+    """Add a message to a conversation"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        """
+        INSERT INTO messages (conversation_id, user_id, role, content, query_sql, result_json, result_row_count)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (conversation_id, user_id, role, content, query_sql, result_json, row_count),
+    )
+    conn.commit()
+    message_id = cursor.lastrowid
+    
+    # Update conversation message count and timestamp
+    cursor.execute(
+        """
+        UPDATE conversations
+        SET message_count = message_count + 1, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (conversation_id,),
+    )
+    conn.commit()
+    conn.close()
+    
+    return message_id
+
+
+def get_conversation_history(conversation_id, user_id, limit=50):
+    """Get all messages in a conversation"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        """
+        SELECT id, role, content, query_sql, result_json, result_row_count, created_at
+        FROM messages
+        WHERE conversation_id = ? AND user_id = ?
+        ORDER BY created_at ASC
+        LIMIT ?
+        """,
+        (conversation_id, user_id, limit),
+    )
+    messages = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    
+    return messages
+
+
+# ==================== QUERY HISTORY ====================
+
+def log_query(user_id, conversation_id, table_names, question, query_sql, row_count, exec_time_ms, success=True, error_msg=None):
+    """Log a query execution"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        """
+        INSERT INTO query_history (user_id, conversation_id, table_names, question, query_sql, result_row_count, execution_time_ms, success, error_message)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            user_id,
+            conversation_id,
+            json.dumps(table_names),
+            question,
+            query_sql,
+            row_count,
+            exec_time_ms,
+            1 if success else 0,
+            error_msg,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_query_history(user_id, limit=100, offset=0):
+    """Get query history for a user"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        """
+        SELECT id, question, query_sql, result_row_count, execution_time_ms, success, created_at
+        FROM query_history
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        LIMIT ? OFFSET ?
+        """,
+        (user_id, limit, offset),
+    )
+    history = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    
+    return history
+
+
+# ==================== WORKSPACE ====================
 
 def save_user_workspace(user_id, workspace_state):
     conn = get_connection()
@@ -178,6 +502,8 @@ def load_user_workspace(user_id):
     return json.loads(row[0])
 
 
+# ==================== DATA OPERATIONS ====================
+
 def run_query(query):
     """Execute a SELECT query and return results"""
     try:
@@ -186,23 +512,18 @@ def run_query(query):
         cursor.execute(query)
         result = cursor.fetchall()
         conn.close()
-        # Convert sqlite3.Row to dict for consistency
         return [dict(row) for row in result]
     except Exception as e:
         return str(e)
 
 
 def get_schema(table_name):
-    """
-    Returns a rich schema with column names, types, AND sample values.
-    This is critical so the AI knows what data looks like.
-    """
+    """Returns schema with column names, types, and sample values"""
     conn = get_connection()
     cursor = conn.cursor()
 
     schema = f"Table name: {table_name}\nColumns:\n"
 
-    # Get column names and types
     cursor.execute(f"PRAGMA table_info({table_name})")
     columns = cursor.fetchall()
 
@@ -213,7 +534,6 @@ def get_schema(table_name):
         schema += f"  - {col_name} ({col_type})\n"
         col_names.append(col_name)
 
-    # Get sample rows so AI understands the actual values
     cursor.execute(f"SELECT * FROM {table_name} LIMIT 5")
     sample_rows = cursor.fetchall()
 
@@ -224,7 +544,6 @@ def get_schema(table_name):
         for row in sample_rows:
             schema += " | ".join(str(v) for v in row) + "\n"
 
-    # Get unique values for text columns (helps AI know exact filter values)
     schema += "\nUnique values in text columns:\n"
     for col in columns:
         col_name = col[1]
@@ -242,17 +561,15 @@ def get_schema(table_name):
     return schema
 
 
-def insert_data(df, source_name=None):
+def insert_data(df, user_id, source_name=None):
     """Insert CSV data into a new SQLite table"""
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Clean column names - remove problematic characters
+    # Clean column names
     df.columns = [re.sub(r'[^a-zA-Z0-9_]', '_', col.strip().lower()) for col in df.columns]
-    # Ensure column names don't start with numbers
     df.columns = [f"col_{col}" if col[0].isdigit() else col for col in df.columns]
 
-    # Unique table name using source name + timestamp
     if source_name:
         base_name = re.sub(r"[^a-zA-Z0-9_]+", "_", source_name.rsplit(".", 1)[0].lower()).strip("_")
     else:
@@ -263,10 +580,9 @@ def insert_data(df, source_name=None):
 
     table_name = f"{base_name}_{time.time_ns()}"
 
-    # Build column definitions for SQLite - quote column names
+    # Build column definitions
     column_defs = []
     for col in df.columns:
-        # SQLite is flexible with types, but we'll hint them
         if df[col].dtype == "int64":
             column_defs.append(f'"{col}" INTEGER')
         elif df[col].dtype == "float64":
@@ -277,7 +593,7 @@ def insert_data(df, source_name=None):
     columns_sql = ", ".join(column_defs)
     cursor.execute(f"CREATE TABLE {table_name} ({columns_sql})")
 
-    # Insert rows safely with parameterized queries - quote column names
+    # Insert rows
     for _, row in df.iterrows():
         placeholders = ", ".join(["?"] * len(row))
         cols = ", ".join([f'"{col}"' for col in df.columns])
@@ -285,5 +601,36 @@ def insert_data(df, source_name=None):
         cursor.execute(query, tuple(None if str(v) == 'nan' else v for v in row))
 
     conn.commit()
+    
+    # Log table metadata
+    cursor.execute(
+        """
+        INSERT INTO user_tables (user_id, table_name, source_filename, row_count, column_count)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (user_id, table_name, source_name, len(df), len(df.columns)),
+    )
+    conn.commit()
     conn.close()
+    
     return table_name
+
+
+def get_user_tables(user_id):
+    """Get all tables uploaded by a user"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        """
+        SELECT table_name, source_filename, row_count, column_count, created_at
+        FROM user_tables
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        """,
+        (user_id,),
+    )
+    tables = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    
+    return tables
