@@ -1110,12 +1110,12 @@ def execute_sql_workflow(question, sql, table_names):
                 f"The query returned {len(result_df)} rows and {len(result_df.columns)} columns."
             )
 
-        summary, summary_error = generate_result_summary(question, sql, result_df, table_names)
+        summary, summary_error = generate_result_summary(result_df, question, table_names)
         if summary_error or not summary:
             summary = fallback_summary
 
         follow_ups, follow_up_error = generate_follow_up_questions(
-            question, sql, result_df, table_names
+            result_df, question, table_names
         )
         if follow_up_error or not follow_ups:
             follow_ups = []
