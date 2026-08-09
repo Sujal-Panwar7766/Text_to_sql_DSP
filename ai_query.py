@@ -9,7 +9,7 @@ from db import get_schema
 load_project_env()
 
 HF_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "")
-HF_MODEL = "meta-llama/Llama-2-7b-chat-hf"  # Free, fast model
+HF_MODEL = "google/flan-t5-base"  # Free, public model (no approval needed)
 HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
 
 
@@ -29,8 +29,8 @@ def build_schema_context(table_names):
 def run_ai_task(system_message, user_prompt, max_tokens=256, temperature=0):
     """Call HuggingFace inference API"""
     try:
-        # Format prompt for chat model
-        full_prompt = f"[INST] {system_message}\n\n{user_prompt} [/INST]"
+        # Format prompt for Flan-T5 (simpler format, no special tokens needed)
+        full_prompt = f"{system_message}\n\n{user_prompt}"
         
         headers = {
             "Authorization": f"Bearer {HF_API_KEY}",
@@ -60,10 +60,7 @@ def run_ai_task(system_message, user_prompt, max_tokens=256, temperature=0):
         
         # Extract generated text
         if isinstance(result, list) and len(result) > 0:
-            generated_text = result[0].get("generated_text", "")
-            # Remove the input prompt from output
-            if "[/INST]" in generated_text:
-                generated_text = generated_text.split("[/INST]")[-1].strip()
+            generated_text = result[0].get("generated_text", "").strip()
             return generated_text, None
         
         return None, "Unexpected API response format"
