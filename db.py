@@ -3,134 +3,51 @@ import hmac
 import json
 import os
 import re
-import tempfile
+import sqlite3
 import time
-from functools import lru_cache
 from pathlib import Path
 
-import mysql.connector
 from env_loader import load_project_env
 
 load_project_env()
 
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "port": int(os.getenv("DB_PORT", "3306")),
-    "user": os.getenv("DB_USER", "root"),
-    "password": os.getenv("DB_PASSWORD", ""),
-    "database": os.getenv("DB_NAME", "mydb"),
-}
-
-DB_CONNECTION_TIMEOUT = int(os.getenv("DB_CONNECTION_TIMEOUT", "5"))
+# SQLite database file (stored in current directory)
+DB_PATH = "app_data.db"
 
 PASSWORD_ITERATIONS = 100_000
 
 
-def _env_flag(name, default=False):
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _looks_like_pem(value):
-    return "-----BEGIN" in value
-
-
-@lru_cache(maxsize=None)
-def _materialize_secret_file(prefix, value):
-    if not value:
-        return None
-
-    if not _looks_like_pem(value):
-        return value
-
-    secret_dir = Path(tempfile.gettempdir()) / "ai_text_to_sql_secrets"
-    secret_dir.mkdir(parents=True, exist_ok=True)
-
-    secret_hash = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
-    secret_path = secret_dir / f"{prefix}_{secret_hash}.pem"
-    secret_path.write_text(value, encoding="utf-8")
-    return str(secret_path)
-
-
-def _build_ssl_config():
-    if _env_flag("DB_SSL_DISABLED", default=False):
-        return {}
-
-    ssl_ca = _materialize_secret_file("db_ssl_ca", os.getenv("DB_SSL_CA", "").strip())
-    ssl_cert = _materialize_secret_file("db_ssl_cert", os.getenv("DB_SSL_CERT", "").strip())
-    ssl_key = _materialize_secret_file("db_ssl_key", os.getenv("DB_SSL_KEY", "").strip())
-
-    ssl_config = {}
-    if ssl_ca:
-        ssl_config["ssl_ca"] = ssl_ca
-    if ssl_cert:
-        ssl_config["ssl_cert"] = ssl_cert
-    if ssl_key:
-        ssl_config["ssl_key"] = ssl_key
-
-    if ssl_config:
-        ssl_config["ssl_verify_cert"] = _env_flag("DB_SSL_VERIFY_CERT", default=True)
-
-    return ssl_config
-
-
-DB_SSL_CONFIG = _build_ssl_config()
-
-
 def get_connection():
-    return mysql.connector.connect(
-        **DB_CONFIG,
-        **DB_SSL_CONFIG,
-        connection_timeout=DB_CONNECTION_TIMEOUT,
-    )
-
-
-def get_server_connection():
-    server_config = DB_CONFIG.copy()
-    server_config.pop("database", None)
-    return mysql.connector.connect(
-        **server_config,
-        **DB_SSL_CONFIG,
-        connection_timeout=DB_CONNECTION_TIMEOUT,
-    )
-
-
-def ensure_database_exists():
-    conn = get_server_connection()
-    cursor = conn.cursor()
-    cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{DB_CONFIG['database']}`")
-    conn.commit()
-    conn.close()
+    """Get SQLite connection"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row  # Return rows as dictionaries
+    return conn
 
 
 def ensure_users_table():
-    ensure_database_exists()
+    """Create users and workspaces tables if they don't exist"""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        """
+    
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            full_name VARCHAR(255) NOT NULL,
-            email VARCHAR(255) NOT NULL UNIQUE,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            full_name TEXT NOT NULL,
+            email TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        """
-    )
-    cursor.execute(
-        """
+    """)
+    
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_workspaces (
-            user_id INT PRIMARY KEY,
-            workspace_json LONGTEXT NOT NULL,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                ON UPDATE CURRENT_TIMESTAMP,
+            user_id INTEGER PRIMARY KEY,
+            workspace_json TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
-        """
-    )
+    """)
+    
     conn.commit()
     conn.close()
 
@@ -171,9 +88,9 @@ def verify_password(password, stored_password_hash):
 def create_user(full_name, email, password):
     normalized_email = normalize_email(email)
     conn = get_connection()
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor()
 
-    cursor.execute("SELECT id FROM users WHERE email = %s", (normalized_email,))
+    cursor.execute("SELECT id FROM users WHERE email = ?", (normalized_email,))
     existing_user = cursor.fetchone()
     if existing_user:
         conn.close()
@@ -183,7 +100,7 @@ def create_user(full_name, email, password):
     cursor.execute(
         """
         INSERT INTO users (full_name, email, password_hash)
-        VALUES (%s, %s, %s)
+        VALUES (?, ?, ?)
         """,
         (full_name.strip(), normalized_email, password_hash),
     )
@@ -204,12 +121,12 @@ def create_user(full_name, email, password):
 def authenticate_user(email, password):
     normalized_email = normalize_email(email)
     conn = get_connection()
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor()
     cursor.execute(
         """
         SELECT id, full_name, email, password_hash
         FROM users
-        WHERE email = %s
+        WHERE email = ?
         """,
         (normalized_email,),
     )
@@ -232,10 +149,8 @@ def save_user_workspace(user_id, workspace_state):
     workspace_json = json.dumps(workspace_state)
     cursor.execute(
         """
-        INSERT INTO user_workspaces (user_id, workspace_json)
-        VALUES (%s, %s)
-        ON DUPLICATE KEY UPDATE
-            workspace_json = VALUES(workspace_json)
+        INSERT OR REPLACE INTO user_workspaces (user_id, workspace_json)
+        VALUES (?, ?)
         """,
         (user_id, workspace_json),
     )
@@ -250,7 +165,7 @@ def load_user_workspace(user_id):
         """
         SELECT workspace_json
         FROM user_workspaces
-        WHERE user_id = %s
+        WHERE user_id = ?
         """,
         (user_id,),
     )
@@ -264,13 +179,15 @@ def load_user_workspace(user_id):
 
 
 def run_query(query):
+    """Execute a SELECT query and return results"""
     try:
         conn = get_connection()
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor()
         cursor.execute(query)
         result = cursor.fetchall()
         conn.close()
-        return result
+        # Convert sqlite3.Row to dict for consistency
+        return [dict(row) for row in result]
     except Exception as e:
         return str(e)
 
@@ -286,13 +203,15 @@ def get_schema(table_name):
     schema = f"Table name: {table_name}\nColumns:\n"
 
     # Get column names and types
-    cursor.execute(f"DESCRIBE {table_name}")
+    cursor.execute(f"PRAGMA table_info({table_name})")
     columns = cursor.fetchall()
 
     col_names = []
     for col in columns:
-        schema += f"  - {col[0]} ({col[1]})\n"
-        col_names.append(col[0])
+        col_name = col[1]
+        col_type = col[2]
+        schema += f"  - {col_name} ({col_type})\n"
+        col_names.append(col_name)
 
     # Get sample rows so AI understands the actual values
     cursor.execute(f"SELECT * FROM {table_name} LIMIT 5")
@@ -308,11 +227,11 @@ def get_schema(table_name):
     # Get unique values for text columns (helps AI know exact filter values)
     schema += "\nUnique values in text columns:\n"
     for col in columns:
-        col_name = col[0]
-        col_type = col[1].lower()
-        if "text" in col_type or "varchar" in col_type or "char" in col_type:
+        col_name = col[1]
+        col_type = col[2].lower()
+        if "text" in col_type or "char" in col_type:
             try:
-                cursor.execute(f"SELECT DISTINCT `{col_name}` FROM {table_name} LIMIT 10")
+                cursor.execute(f"SELECT DISTINCT {col_name} FROM {table_name} LIMIT 10")
                 unique_vals = [str(r[0]) for r in cursor.fetchall() if r[0] is not None]
                 if unique_vals:
                     schema += f"  - {col_name}: {', '.join(unique_vals)}\n"
@@ -324,13 +243,14 @@ def get_schema(table_name):
 
 
 def insert_data(df, source_name=None):
+    """Insert CSV data into a new SQLite table"""
     conn = get_connection()
     cursor = conn.cursor()
 
     # Clean column names
     df.columns = [col.strip().replace(" ", "_").lower() for col in df.columns]
 
-    # Unique table name using source name + high resolution timestamp
+    # Unique table name using source name + timestamp
     if source_name:
         base_name = re.sub(r"[^a-zA-Z0-9_]+", "_", source_name.rsplit(".", 1)[0].lower()).strip("_")
     else:
@@ -341,24 +261,25 @@ def insert_data(df, source_name=None):
 
     table_name = f"{base_name}_{time.time_ns()}"
 
-    # Build column definitions
+    # Build column definitions for SQLite
     column_defs = []
     for col in df.columns:
+        # SQLite is flexible with types, but we'll hint them
         if df[col].dtype == "int64":
-            column_defs.append(f"`{col}` INT")
+            column_defs.append(f"{col} INTEGER")
         elif df[col].dtype == "float64":
-            column_defs.append(f"`{col}` FLOAT")
+            column_defs.append(f"{col} REAL")
         else:
-            column_defs.append(f"`{col}` TEXT")
+            column_defs.append(f"{col} TEXT")
 
     columns_sql = ", ".join(column_defs)
-    cursor.execute(f"CREATE TABLE `{table_name}` ({columns_sql})")
+    cursor.execute(f"CREATE TABLE {table_name} ({columns_sql})")
 
     # Insert rows safely with parameterized queries
     for _, row in df.iterrows():
-        placeholders = ", ".join(["%s"] * len(row))
-        cols = ", ".join([f"`{c}`" for c in df.columns])
-        query = f"INSERT INTO `{table_name}` ({cols}) VALUES ({placeholders})"
+        placeholders = ", ".join(["?"] * len(row))
+        cols = ", ".join(df.columns)
+        query = f"INSERT INTO {table_name} ({cols}) VALUES ({placeholders})"
         cursor.execute(query, tuple(None if str(v) == 'nan' else v for v in row))
 
     conn.commit()

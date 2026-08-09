@@ -1,7 +1,6 @@
 streamlit
 pandas
 requests
-mysql-connector-python
-groq
+huggingface-hub
 openpyxl
 python-dotenv
