@@ -14,7 +14,7 @@ load_project_env()
 def load_model():
     """Load the text generation model (cached for performance)"""
     try:
-        return pipeline("text2text-generation", model="google/flan-t5-base", device=-1)
+        return pipeline("text-generation", model="google/flan-t5-base", device=-1)
     except Exception as e:
         st.error(f"Failed to load model: {e}")
         return None
@@ -46,13 +46,17 @@ def run_ai_task(system_message, user_prompt, max_tokens=256, temperature=0):
         # Generate text
         result = model(
             full_prompt,
-            max_length=max_tokens,
+            max_length=max_tokens + 50,  # Add buffer for prompt length
             num_beams=1,
             early_stopping=True,
+            do_sample=False,
         )
         
         if result and len(result) > 0:
             generated_text = result[0].get("generated_text", "").strip()
+            # Remove the input prompt if it's included in the output
+            if generated_text.startswith(full_prompt):
+                generated_text = generated_text[len(full_prompt):].strip()
             return generated_text, None
         
         return None, "No response from model"
