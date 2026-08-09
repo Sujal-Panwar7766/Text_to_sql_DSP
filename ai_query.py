@@ -1,23 +1,11 @@
 import os
 import re
 
-import streamlit as st
-from transformers import pipeline
 from env_loader import load_project_env
 
 from db import get_schema
 
 load_project_env()
-
-# Load the model once and cache it
-@st.cache_resource
-def load_model():
-    """Load the text generation model (cached for performance)"""
-    try:
-        return pipeline("text-generation", model="google/flan-t5-base", device=-1)
-    except Exception as e:
-        st.error(f"Failed to load model: {e}")
-        return None
 
 
 def normalize_table_names(table_names):
@@ -33,60 +21,8 @@ def build_schema_context(table_names):
     return "\n\n".join(get_schema(table_name) for table_name in normalized_tables)
 
 
-def run_ai_task(system_message, user_prompt, max_tokens=256, temperature=0):
-    """Run AI task using local transformers model"""
-    try:
-        model = load_model()
-        if model is None:
-            return None, "Model failed to load"
-        
-        # Combine system message and user prompt
-        full_prompt = f"{system_message}\n\n{user_prompt}"
-        
-        # Generate text
-        result = model(
-            full_prompt,
-            max_length=max_tokens + 50,  # Add buffer for prompt length
-            num_beams=1,
-            early_stopping=True,
-            do_sample=False,
-        )
-        
-        if result and len(result) > 0:
-            generated_text = result[0].get("generated_text", "").strip()
-            # Remove the input prompt if it's included in the output
-            if generated_text.startswith(full_prompt):
-                generated_text = generated_text[len(full_prompt):].strip()
-            return generated_text, None
-        
-        return None, "No response from model"
-        
-    except Exception as e:
-        error = str(e)
-        if "cuda" in error.lower() or "gpu" in error.lower():
-            return None, "Model error. Try again later."
-        return None, f"AI Error: {error}"
-
-
-def extract_sql(text):
-    """Extract SQL query from AI response"""
-    match = re.search(r"```(?:sql)?\s*(SELECT.*?)```", text, re.IGNORECASE | re.DOTALL)
-    if match:
-        return match.group(1).strip().rstrip(";") + ";"
-
-    match = re.search(r"(SELECT\s+.*?;)", text, re.IGNORECASE | re.DOTALL)
-    if match:
-        return match.group(1).strip()
-
-    match = re.search(r"(SELECT\s+.+?)(?:\n|$)", text, re.IGNORECASE)
-    if match:
-        return match.group(1).strip() + ";"
-
-    return None
-
-
 def extract_lines(text, max_items=7):
-    """Extract lines from AI response"""
+    """Extract lines from text response"""
     items = []
     seen = set()
 
@@ -112,7 +48,7 @@ def extract_lines(text, max_items=7):
 
 
 def format_result_context(result_df, max_rows=10):
-    """Format query results for AI"""
+    """Format query results for context"""
     if result_df is None or result_df.empty:
         return "No rows returned."
 
@@ -127,150 +63,118 @@ def format_result_context(result_df, max_rows=10):
 
 
 def generate_sql(user_question, table_names):
-    """Generate SQL query from natural language question"""
+    """Generate SQL query from natural language using rule-based approach"""
     normalized_tables = normalize_table_names(table_names)
-    schema_context = build_schema_context(normalized_tables)
-    table_list = ", ".join(normalized_tables)
-
-    prompt = f"""Generate a SQL SELECT query.
-
-Available tables:
-{table_list}
-
-{schema_context}
-
-RULES:
-1. Return ONLY a valid SQL SELECT query. No explanation.
-2. Use ONLY the tables and columns shown above.
-3. Always end with semicolon.
-
-Question: {user_question}
-
-SQL:"""
-
-    raw_text, error = run_ai_task(
-        "You are a SQL expert. Return only a SQL SELECT query with no explanation.",
-        prompt,
-        max_tokens=300,
-        temperature=0,
-    )
-    if error:
-        return None, error
-
-    sql = extract_sql(raw_text)
-    if not sql:
-        return None, f"Could not extract SQL from response:\n{raw_text}"
-
-    if not re.match(r"^\s*SELECT\b", sql, re.IGNORECASE):
-        return None, "AI returned a non-SELECT statement. Please try again."
-
-    if re.match(r"SELECT\s+\*\s+FROM\s+\w+\s*;", sql, re.IGNORECASE):
-        return None, "AI returned a generic query. Please be more specific in your question."
-
-    return sql, None
+    if not normalized_tables:
+        return None, "No tables selected"
+    
+    table_name = normalized_tables[0]
+    schema = get_schema(table_name)
+    question = user_question.lower()
+    
+    # Extract column names from schema
+    col_names = []
+    for line in schema.split('\n'):
+        if ' - ' in line and '(' in line:
+            col = line.split(' - ')[0].strip()
+            if col and not col.startswith('Table'):
+                col_names.append(col)
+    
+    if not col_names:
+        return None, "Could not parse table schema"
+    
+    # Rule-based SQL generation
+    try:
+        # COUNT queries
+        if "how many" in question or "count" in question or "total" in question:
+            return f"SELECT COUNT(*) as count FROM {table_name};", None
+        
+        # SHOW ALL / FIRST N ROWS
+        if "show all" in question or "display all" in question or "select all" in question:
+            return f"SELECT * FROM {table_name};", None
+        
+        if "first" in question and "rows" in question:
+            match = re.search(r'first\s+(\d+)', question)
+            if match:
+                n = match.group(1)
+                return f"SELECT * FROM {table_name} LIMIT {n};", None
+            return f"SELECT * FROM {table_name} LIMIT 10;", None
+        
+        # DISTINCT values
+        if "distinct" in question or "unique" in question or "different" in question:
+            for col in col_names:
+                if col.lower() in question or question.find(col.lower()) != -1:
+                    return f"SELECT DISTINCT {col} FROM {table_name};", None
+            # Default to first non-numeric column
+            return f"SELECT DISTINCT {col_names[0]} FROM {table_name};", None
+        
+        # AVERAGE
+        if "average" in question or "avg" in question or "mean" in question:
+            for col in col_names:
+                if col.lower() in question:
+                    return f"SELECT AVG({col}) as average FROM {table_name};", None
+            return f"SELECT AVG({col_names[0]}) as average FROM {table_name};", None
+        
+        # MIN/MAX
+        if "minimum" in question or "lowest" in question or "min" in question:
+            for col in col_names:
+                if col.lower() in question:
+                    return f"SELECT * FROM {table_name} ORDER BY {col} ASC LIMIT 10;", None
+        
+        if "maximum" in question or "highest" in question or "max" in question:
+            for col in col_names:
+                if col.lower() in question:
+                    return f"SELECT * FROM {table_name} ORDER BY {col} DESC LIMIT 10;", None
+        
+        # GROUP BY / COUNT
+        if "group" in question or "by" in question:
+            for col in col_names:
+                if col.lower() in question:
+                    return f"SELECT {col}, COUNT(*) as count FROM {table_name} GROUP BY {col};", None
+        
+        # Default: SELECT all
+        return f"SELECT * FROM {table_name} LIMIT 20;", None
+        
+    except Exception as e:
+        return None, f"Error generating SQL: {str(e)}"
 
 
 def generate_example_questions(table_names):
-    """Generate example questions for the user"""
-    normalized_tables = normalize_table_names(table_names)
-    schema_context = build_schema_context(normalized_tables)
-    scope = ", ".join(normalized_tables)
-
-    prompt = f"""Generate 5 example questions about this data. Return only the questions, one per line.
-
-Tables:
-{scope}
-
-{schema_context}
-
-Questions:"""
-
-    raw_text, error = run_ai_task(
-        "Generate short example questions for data exploration.",
-        prompt,
-        max_tokens=220,
-        temperature=0.3,
-    )
-    if error:
-        return None, error
-
-    questions = extract_lines(raw_text, max_items=5)
-    if not questions:
-        return None, f"Could not extract example questions:\n{raw_text}"
-
-    return questions, None
+    """Generate example questions"""
+    return [
+        "How many rows are there?",
+        "Show the first 10 rows.",
+        "What are the distinct values?",
+        "Which rows have the highest values?",
+        "What is the average value?",
+    ], None
 
 
 def generate_table_insights(table_name):
-    """Generate insights about uploaded table"""
-    schema = get_schema(table_name)
-    prompt = f"""Analyze this table and provide 3 short insights about the data. One per line.
-
-{schema}
-
-Insights:"""
-
-    raw_text, error = run_ai_task(
-        "Analyze data and provide brief insights.",
-        prompt,
-        max_tokens=200,
-        temperature=0.5,
-    )
-    if error:
-        return None, error
-
-    insights = extract_lines(raw_text, max_items=3)
-    return insights if insights else None, error
+    """Generate insights about table"""
+    return [
+        "Table uploaded successfully.",
+        "Ready to answer questions about your data.",
+        "Use natural language to query your data.",
+    ], None
 
 
 def generate_follow_up_questions(result_df, original_question, table_names):
-    """Generate follow-up questions based on query results"""
-    result_context = format_result_context(result_df, max_rows=5)
-    schema_context = build_schema_context(table_names)
-
-    prompt = f"""Based on these query results, suggest 3 follow-up questions. One per line.
-
-Original question: {original_question}
-
-Results:
-{result_context}
-
-Follow-up questions:"""
-
-    raw_text, error = run_ai_task(
-        "Suggest follow-up questions for data exploration.",
-        prompt,
-        max_tokens=250,
-        temperature=0.5,
-    )
-    if error:
-        return None, error
-
-    questions = extract_lines(raw_text, max_items=3)
-    return questions if questions else None, error
+    """Generate follow-up questions"""
+    return [
+        "Show me more details.",
+        "What is the average value?",
+        "Count rows by category.",
+        "Find the highest values.",
+    ], None
 
 
 def generate_result_summary(result_df, user_question, table_names):
-    """Generate AI summary of query results"""
-    result_context = format_result_context(result_df, max_rows=10)
-    schema_context = build_schema_context(table_names)
-
-    prompt = f"""Summarize these query results in 2-3 sentences.
-
-Question: {user_question}
-
-Results:
-{result_context}
-
-Summary:"""
-
-    raw_text, error = run_ai_task(
-        "Provide clear summaries of SQL query results.",
-        prompt,
-        max_tokens=200,
-        temperature=0.5,
-    )
-    if error:
-        return None, error
-
-    return raw_text.strip() if raw_text else None, error
+    """Generate summary of results"""
+    if result_df is None or result_df.empty:
+        return "No results found.", None
+    
+    num_rows = len(result_df)
+    num_cols = len(result_df.columns)
+    
+    return f"Query returned {num_rows} rows with {num_cols} columns.", None
