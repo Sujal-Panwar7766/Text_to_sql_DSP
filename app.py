@@ -1359,9 +1359,7 @@ if st.session_state["current_table"]:
         error_key = f"{insights_key}_error"
         if insights_key not in st.session_state:
             with st.spinner("Generating AI insights for this upload..."):
-                ai_insights, ai_error = generate_table_insights(
-                    current_table, current_meta["profile_text"]
-                )
+                ai_insights, ai_error = generate_table_insights(current_table)
                 st.session_state[insights_key] = ai_insights or []
                 st.session_state[error_key] = ai_error
 
