@@ -1,6 +1,7 @@
 streamlit
 pandas
 requests
-huggingface-hub
+transformers
+torch
 openpyxl
 python-dotenv
