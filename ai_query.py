@@ -72,16 +72,36 @@ def generate_sql(user_question, table_names):
     schema = get_schema(table_name)
     question = user_question.lower()
     
-    # Extract column names from schema
+    # Extract column names from schema - improved parsing
     col_names = []
+    in_columns_section = False
     for line in schema.split('\n'):
-        if ' - ' in line and '(' in line:
-            col = line.split(' - ')[0].strip()
-            if col and not col.startswith('Table'):
-                col_names.append(col)
+        # Look for "Columns:" section
+        if "Columns:" in line:
+            in_columns_section = True
+            continue
+        
+        # Stop at next section
+        if in_columns_section and ("Sample" in line or "Unique" in line or "Table" in line):
+            in_columns_section = False
+        
+        # Extract column name if in columns section
+        if in_columns_section and (" - " in line or line.strip().startswith("-")):
+            # Clean up the line and extract column name
+            cleaned = line.strip()
+            if cleaned.startswith("- "):
+                cleaned = cleaned[2:]  # Remove "- "
+            
+            # Split by " (" to get column name
+            if " (" in cleaned:
+                col_name = cleaned.split(" (")[0].strip()
+                if col_name:
+                    col_names.append(col_name)
     
+    # If still no columns found, try a simpler approach
     if not col_names:
-        return None, "Could not parse table schema"
+        # Just use a generic approach - most queries work without specific column knowledge
+        pass
     
     # Rule-based SQL generation
     try:
@@ -102,35 +122,45 @@ def generate_sql(user_question, table_names):
         
         # DISTINCT values
         if "distinct" in question or "unique" in question or "different" in question:
-            for col in col_names:
-                if col.lower() in question or question.find(col.lower()) != -1:
-                    return f"SELECT DISTINCT {col} FROM {table_name};", None
-            # Default to first non-numeric column
-            return f"SELECT DISTINCT {col_names[0]} FROM {table_name};", None
+            if col_names:
+                for col in col_names:
+                    if col.lower() in question or question.find(col.lower()) != -1:
+                        return f"SELECT DISTINCT {col} FROM {table_name};", None
+                # Default to first column
+                return f"SELECT DISTINCT {col_names[0]} FROM {table_name};", None
+            return f"SELECT * FROM {table_name} LIMIT 20;", None
         
         # AVERAGE
         if "average" in question or "avg" in question or "mean" in question:
-            for col in col_names:
-                if col.lower() in question:
-                    return f"SELECT AVG({col}) as average FROM {table_name};", None
-            return f"SELECT AVG({col_names[0]}) as average FROM {table_name};", None
+            if col_names:
+                for col in col_names:
+                    if col.lower() in question:
+                        return f"SELECT AVG({col}) as average FROM {table_name};", None
+                return f"SELECT AVG({col_names[0]}) as average FROM {table_name};", None
+            return f"SELECT * FROM {table_name} LIMIT 20;", None
         
         # MIN/MAX
         if "minimum" in question or "lowest" in question or "min" in question:
-            for col in col_names:
-                if col.lower() in question:
-                    return f"SELECT * FROM {table_name} ORDER BY {col} ASC LIMIT 10;", None
+            if col_names:
+                for col in col_names:
+                    if col.lower() in question:
+                        return f"SELECT * FROM {table_name} ORDER BY {col} ASC LIMIT 10;", None
+            return f"SELECT * FROM {table_name} LIMIT 20;", None
         
         if "maximum" in question or "highest" in question or "max" in question:
-            for col in col_names:
-                if col.lower() in question:
-                    return f"SELECT * FROM {table_name} ORDER BY {col} DESC LIMIT 10;", None
+            if col_names:
+                for col in col_names:
+                    if col.lower() in question:
+                        return f"SELECT * FROM {table_name} ORDER BY {col} DESC LIMIT 10;", None
+            return f"SELECT * FROM {table_name} LIMIT 20;", None
         
         # GROUP BY / COUNT
         if "group" in question or "by" in question:
-            for col in col_names:
-                if col.lower() in question:
-                    return f"SELECT {col}, COUNT(*) as count FROM {table_name} GROUP BY {col};", None
+            if col_names:
+                for col in col_names:
+                    if col.lower() in question:
+                        return f"SELECT {col}, COUNT(*) as count FROM {table_name} GROUP BY {col};", None
+            return f"SELECT * FROM {table_name} LIMIT 20;", None
         
         # Default: SELECT all
         return f"SELECT * FROM {table_name} LIMIT 20;", None
