@@ -247,8 +247,10 @@ def insert_data(df, source_name=None):
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Clean column names
-    df.columns = [col.strip().replace(" ", "_").lower() for col in df.columns]
+    # Clean column names - remove problematic characters
+    df.columns = [re.sub(r'[^a-zA-Z0-9_]', '_', col.strip().lower()) for col in df.columns]
+    # Ensure column names don't start with numbers
+    df.columns = [f"col_{col}" if col[0].isdigit() else col for col in df.columns]
 
     # Unique table name using source name + timestamp
     if source_name:
@@ -261,24 +263,24 @@ def insert_data(df, source_name=None):
 
     table_name = f"{base_name}_{time.time_ns()}"
 
-    # Build column definitions for SQLite
+    # Build column definitions for SQLite - quote column names
     column_defs = []
     for col in df.columns:
         # SQLite is flexible with types, but we'll hint them
         if df[col].dtype == "int64":
-            column_defs.append(f"{col} INTEGER")
+            column_defs.append(f'"{col}" INTEGER')
         elif df[col].dtype == "float64":
-            column_defs.append(f"{col} REAL")
+            column_defs.append(f'"{col}" REAL')
         else:
-            column_defs.append(f"{col} TEXT")
+            column_defs.append(f'"{col}" TEXT')
 
     columns_sql = ", ".join(column_defs)
     cursor.execute(f"CREATE TABLE {table_name} ({columns_sql})")
 
-    # Insert rows safely with parameterized queries
+    # Insert rows safely with parameterized queries - quote column names
     for _, row in df.iterrows():
         placeholders = ", ".join(["?"] * len(row))
-        cols = ", ".join(df.columns)
+        cols = ", ".join([f'"{col}"' for col in df.columns])
         query = f"INSERT INTO {table_name} ({cols}) VALUES ({placeholders})"
         cursor.execute(query, tuple(None if str(v) == 'nan' else v for v in row))
 
