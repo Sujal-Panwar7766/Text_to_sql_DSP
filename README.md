@@ -162,8 +162,8 @@ git push origin main
 ### Cost Breakdown
 - ✅ Streamlit Cloud: **FREE**
 - ✅ Database (SQLite): **FREE**
-- ✅ AI Engine (Rule-based): **FREE**
-- ✅ Total: **$0/month**
+- ✅ AI Engine: **Groq API key required for best results**
+- ✅ Fallback mode: **Rule-based SQL if Groq is unavailable**
 
 ### Features That Scale
 - Unlimited users
@@ -186,16 +186,16 @@ git push origin main
 
 ## 🛠️ Configuration
 
-### Default Setup (No Configuration Needed)
+### Default Setup
 - Database: Auto-created SQLite
 - Auth: Built-in with hashing
-- AI: Rule-based SQL generator
+- AI: Groq-powered SQL generation with local fallback
 - Storage: Local and persisted
 
-### Optional Environment Variables
+### Environment Variables
 ```env
-# Not required for current version
-# Reserved for future enhancements
+GROQ_API_KEY=your_groq_api_key
+GROQ_MODEL=llama-3.3-70b-versatile
 ```
 
 ---
