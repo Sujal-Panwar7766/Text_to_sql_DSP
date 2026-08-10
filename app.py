@@ -293,7 +293,7 @@ def create_or_get_active_conversation():
         st.session_state.conversation_messages = []
         st.session_state.show_new_conversation = False
         save_workspace_state()
-        st.experimental_rerun()
+        return st.session_state.current_conversation
 
     if not st.session_state.current_conversation:
         conversations = get_user_conversations(st.session_state.user["id"])
@@ -307,7 +307,7 @@ def create_or_get_active_conversation():
             }
             st.session_state.conversation_messages = []
             save_workspace_state()
-            st.experimental_rerun()
+            return st.session_state.current_conversation
         else:
             return None
     return st.session_state.current_conversation
