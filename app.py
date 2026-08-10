@@ -47,6 +47,47 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Custom UI styling for a modern workspace look
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background: linear-gradient(180deg, #0b1320 0%, #111827 100%);
+        color: #e2e8f0;
+    }
+    section[data-testid="stSidebar"] {
+        background: #0f172a;
+        color: #e2e8f0;
+    }
+    .stButton>button {
+        background: #2563eb;
+        color: white;
+        border-radius: 14px;
+        border: none;
+        box-shadow: 0 12px 30px rgba(37, 99, 235, 0.25);
+    }
+    .stButton>button:hover {
+        background: #1d4ed8;
+    }
+    .stTextArea>div>textarea,
+    .stTextInput>div>input {
+        background: #0f172a;
+        color: #f8fafc;
+        border: 1px solid #334155;
+        border-radius: 14px;
+    }
+    .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
+        color: #f8fafc;
+    }
+    .stDataFrame table {
+        border-radius: 14px;
+        overflow: hidden;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # Initialize database
 initialize_database()
 
@@ -194,6 +235,7 @@ def show_sidebar():
                         st.session_state.conversation_messages = get_conversation_history(
                             conv['id'], st.session_state.user["id"]
                         )
+                        save_workspace_state()
                         st.rerun()
                 with col2:
                     st.caption(f"({conv['message_count']})")
@@ -212,12 +254,34 @@ def show_sidebar():
             st.rerun()
 
 
-# ==================== MAIN CHAT INTERFACE ====================
+# ==================== WORKSPACE STATE HELPERS ====================
 
-def show_chat_interface():
-    """Show the main chat and query interface"""
-    
-    # Initialize conversation if new
+def save_workspace_state():
+    if not st.session_state.user:
+        return
+    workspace_state = {
+        "current_conversation_id": None,
+    }
+    if st.session_state.current_conversation:
+        workspace_state["current_conversation_id"] = st.session_state.current_conversation["id"]
+    save_user_workspace(st.session_state.user["id"], workspace_state)
+
+
+def load_workspace_state():
+    if not st.session_state.user or st.session_state.get("workspace_loaded", False):
+        return
+    workspace = load_user_workspace(st.session_state.user["id"])
+    if workspace and workspace.get("current_conversation_id"):
+        conv = get_conversation(workspace["current_conversation_id"], st.session_state.user["id"])
+        if conv:
+            st.session_state.current_conversation = conv
+            st.session_state.conversation_messages = get_conversation_history(
+                conv["id"], st.session_state.user["id"]
+            )
+    st.session_state.workspace_loaded = True
+
+
+def create_or_get_active_conversation():
     if st.session_state.show_new_conversation and not st.session_state.current_conversation:
         conv_id = create_conversation(st.session_state.user["id"], "New Conversation")
         st.session_state.current_conversation = {
@@ -228,115 +292,82 @@ def show_chat_interface():
         }
         st.session_state.conversation_messages = []
         st.session_state.show_new_conversation = False
-        st.rerun()
-    
+        save_workspace_state()
+        st.experimental_rerun()
+
     if not st.session_state.current_conversation:
-        st.info("👈 Select a conversation or start a new chat from the sidebar")
-        return
-    
-    # Header
-    st.markdown(f"## {st.session_state.current_conversation['title']}")
-    
-    # Conversation history display
-    if st.session_state.conversation_messages:
-        with st.container(border=True):
-            for msg in st.session_state.conversation_messages:
-                if msg['role'] == 'user':
-                    with st.chat_message("user"):
-                        st.write(msg['content'])
-                else:
-                    with st.chat_message("assistant"):
-                        st.write(msg['content'])
-                        if msg['query_sql']:
-                            with st.expander("🔍 View SQL"):
-                                st.code(msg['query_sql'], language="sql")
-                        if msg['result_json']:
-                            with st.expander("📊 View Results"):
-                                results = json.loads(msg['result_json'])
-                                st.dataframe(results, use_container_width=True)
-    
-    st.divider()
-    
-    # Input area
-    col1, col2 = st.columns([1, 4])
-    
-    with col1:
-        st.markdown("### 📋 Select Tables")
-        user_tables = get_user_tables(st.session_state.user["id"])
-        if user_tables:
-            table_list = [t['table_name'] for t in user_tables]
-            selected = st.multiselect(
-                "Pick tables",
-                table_list,
-                default=st.session_state.current_tables,
-                key="table_select"
-            )
-            st.session_state.current_tables = selected
+        conversations = get_user_conversations(st.session_state.user["id"])
+        if not conversations:
+            conv_id = create_conversation(st.session_state.user["id"], "New Conversation")
+            st.session_state.current_conversation = {
+                "id": conv_id,
+                "title": "New Conversation",
+                "description": "",
+                "message_count": 0,
+            }
+            st.session_state.conversation_messages = []
+            save_workspace_state()
+            st.experimental_rerun()
         else:
-            st.info("📂 Upload data first")
-    
-    with col2:
-        st.markdown("### 💬 Ask a Question")
-        question = st.text_area("What would you like to know about your data?", height=100)
-        
-        if st.button("🚀 Generate SQL & Execute", use_container_width=True, type="primary"):
-            if not question:
-                st.error("Please enter a question")
-            elif not st.session_state.current_tables:
-                st.error("Please select at least one table")
-            else:
-                # Add user message
-                add_message(
-                    st.session_state.current_conversation['id'],
-                    st.session_state.user["id"],
-                    "user",
-                    question
-                )
-                
-                # Generate SQL
-                start_time = time.time()
-                sql, error = generate_sql(question, st.session_state.current_tables)
-                
-                if error:
-                    add_message(
-                        st.session_state.current_conversation['id'],
-                        st.session_state.user["id"],
-                        "assistant",
-                        f"❌ Error: {error}"
-                    )
-                    st.error(error)
-                else:
-                    # Execute query
-                    result = run_query(sql)
-                    exec_time_ms = (time.time() - start_time) * 1000
-                    
-                    if isinstance(result, str):  # Error
-                        add_message(
-                            st.session_state.current_conversation['id'],
-                            st.session_state.user["id"],
-                            "assistant",
-                            f"❌ Execution Error: {result}"
-                        )
-                        log_query(
-                            st.session_state.user["id"],
-                            st.session_state.current_conversation['id'],
-                            st.session_state.current_tables,
-                            question,
-                            sql,
-                            0,
-                            exec_time_ms,
-                            success=False,
-                            error_msg=result
-                        )
-                        st.error(f"Query Error: {result}")
-                    else:
-                        # Success
-                        result_df = pd.DataFrame(result)
-                        result_json = result_df.to_json()
-                        
-                        summary, _ = generate_result_summary(result_df, question, st.session_state.current_tables)
-                        
-                        response = f"""
+            return None
+    return st.session_state.current_conversation
+
+
+def submit_question(question):
+    if not question:
+        return "Please enter a question"
+    if not st.session_state.current_tables:
+        return "Please select at least one table"
+
+    add_message(
+        st.session_state.current_conversation["id"],
+        st.session_state.user["id"],
+        "user",
+        question,
+    )
+
+    start_time = time.time()
+    sql, error = generate_sql(question, st.session_state.current_tables)
+    if error:
+        add_message(
+            st.session_state.current_conversation["id"],
+            st.session_state.user["id"],
+            "assistant",
+            f"❌ Error: {error}",
+        )
+        return error
+
+    result = run_query(sql)
+    exec_time_ms = (time.time() - start_time) * 1000
+
+    if isinstance(result, str):
+        add_message(
+            st.session_state.current_conversation["id"],
+            st.session_state.user["id"],
+            "assistant",
+            f"❌ Execution Error: {result}",
+        )
+        log_query(
+            st.session_state.user["id"],
+            st.session_state.current_conversation["id"],
+            st.session_state.current_tables,
+            question,
+            sql,
+            0,
+            exec_time_ms,
+            success=False,
+            error_msg=result,
+        )
+        st.session_state.conversation_messages = get_conversation_history(
+            st.session_state.current_conversation["id"], st.session_state.user["id"]
+        )
+        return result
+
+    result_df = pd.DataFrame(result)
+    result_json = result_df.to_json()
+    summary, _ = generate_result_summary(result_df, question, st.session_state.current_tables)
+
+    response = f"""
 **SQL Generated:**
 ```sql
 {sql}
@@ -345,128 +376,191 @@ def show_chat_interface():
 **Results:** {len(result_df)} rows returned
 
 **Summary:** {summary}
-                        """
-                        
-                        add_message(
-                            st.session_state.current_conversation['id'],
-                            st.session_state.user["id"],
-                            "assistant",
-                            response,
-                            query_sql=sql,
-                            result_json=result_json,
-                            row_count=len(result_df)
-                        )
-                        
-                        log_query(
-                            st.session_state.user["id"],
-                            st.session_state.current_conversation['id'],
-                            st.session_state.current_tables,
-                            question,
-                            sql,
-                            len(result_df),
-                            exec_time_ms,
-                            success=True
-                        )
-                        
-                        st.success("✅ Query executed successfully!")
-                        st.dataframe(result_df, use_container_width=True)
-                
-                st.rerun()
+"""
+
+    add_message(
+        st.session_state.current_conversation["id"],
+        st.session_state.user["id"],
+        "assistant",
+        response,
+        query_sql=sql,
+        result_json=result_json,
+        row_count=len(result_df),
+    )
+
+    log_query(
+        st.session_state.user["id"],
+        st.session_state.current_conversation["id"],
+        st.session_state.current_tables,
+        question,
+        sql,
+        len(result_df),
+        exec_time_ms,
+        success=True,
+    )
+
+    st.session_state.conversation_messages = get_conversation_history(
+        st.session_state.current_conversation["id"], st.session_state.user["id"]
+    )
+    return None
 
 
-# ==================== UPLOAD DATA PAGE ====================
+def render_upload_section(user_tables):
+    st.markdown("## 📤 Upload & Dataset Summary")
+    st.markdown(
+        "Upload CSV or Excel files first, then ask questions in the same AI chat workspace. "
+        "Your dataset summary, row counts, and column counts appear here instantly."
+    )
 
-def show_upload_page():
-    """Show data upload interface"""
-    st.markdown("## 📤 Upload Data")
-    
     uploaded_files = st.file_uploader(
         "Upload CSV or Excel files",
         type=["csv", "xlsx", "xls"],
         accept_multiple_files=True,
+        key="upload_files",
     )
-    
+
     if uploaded_files:
-        for file in uploaded_files:
-            try:
-                if file.name.endswith(".csv"):
-                    df = pd.read_csv(file)
-                else:
-                    df = pd.read_excel(file)
-                
-                table_name = insert_data(df, st.session_state.user["id"], file.name)
-                st.success(f"✅ {file.name} uploaded! Table: `{table_name}`")
-                st.dataframe(df.head(10), use_container_width=True)
-                
-            except Exception as e:
-                st.error(f"❌ Error uploading {file.name}: {str(e)}")
+        if st.button("📥 Upload Files", use_container_width=True, key="upload_submit"):
+            upload_summary = []
+            for file in uploaded_files:
+                try:
+                    if file.name.endswith(".csv"):
+                        df = pd.read_csv(file)
+                    else:
+                        df = pd.read_excel(file)
 
+                    table_name = insert_data(df, st.session_state.user["id"], file.name)
+                    upload_summary.append(
+                        {
+                            "filename": file.name,
+                            "table": table_name,
+                            "rows": len(df),
+                            "columns": len(df.columns),
+                        }
+                    )
+                except Exception as e:
+                    st.error(f"❌ Error uploading {file.name}: {str(e)}")
 
-# ==================== QUERY HISTORY PAGE ====================
+            if upload_summary:
+                st.session_state.upload_summary = upload_summary
+                st.success("✅ Upload completed successfully!")
+                save_workspace_state()
+                st.experimental_rerun()
 
-def show_history_page():
-    """Show query history"""
-    st.markdown("## 📜 Query History")
-    
-    history = get_query_history(st.session_state.user["id"], limit=50)
-    
-    if history:
-        for i, record in enumerate(history):
-            with st.expander(f"Query {i+1}: {record['question'][:50]}...", expanded=False):
-                st.code(record['query_sql'], language="sql")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Rows", record['result_row_count'])
-                with col2:
-                    st.metric("Time (ms)", f"{record['execution_time_ms']:.1f}")
-                with col3:
-                    status = "✅ Success" if record['success'] else "❌ Failed"
-                    st.metric("Status", status)
-                st.caption(record['created_at'])
+    if st.session_state.get("upload_summary"):
+        st.markdown("### Upload Status")
+        st.table(pd.DataFrame(st.session_state.upload_summary))
+
+    if user_tables:
+        st.markdown("### Uploaded Datasets")
+        summary_table = pd.DataFrame(user_tables)
+        summary_table = summary_table.rename(
+            columns={
+                "source_filename": "Source File",
+                "table_name": "Table Name",
+                "row_count": "Rows",
+                "column_count": "Columns",
+                "created_at": "Uploaded At",
+            }
+        )
+        st.dataframe(summary_table["Source File Table Name Rows Columns Uploaded At".split()], use_container_width=True)
+
+        totals = {
+            "tables": len(user_tables),
+            "total_rows": sum(t["row_count"] for t in user_tables),
+            "total_columns": sum(t["column_count"] for t in user_tables),
+        }
+        col_a, col_b, col_c = st.columns(3)
+        col_a.metric("Tables", totals["tables"])
+        col_b.metric("Total Rows", totals["total_rows"])
+        col_c.metric("Total Columns", totals["total_columns"])
+
+        st.markdown(
+            f"**Dataset Overview:** {totals['tables']} tables, "
+            f"{totals['total_rows']} rows total, {totals['total_columns']} columns total."
+        )
     else:
-        st.info("📭 No query history yet")
+        st.info("Upload your first file to start the AI workspace.")
+
+
+def show_workspace():
+    load_workspace_state()
+    create_or_get_active_conversation()
+
+    user_tables = get_user_tables(st.session_state.user["id"])
+    if user_tables and not st.session_state.current_tables:
+        st.session_state.current_tables = [user_tables[0]["table_name"]]
+
+    render_upload_section(user_tables)
+
+    st.markdown("---")
+    st.markdown("## 💬 AI Chat Workspace")
+
+    if not st.session_state.current_conversation:
+        st.warning("Select a conversation from the sidebar or start a new chat.")
+        return
+
+    st.markdown(f"### {st.session_state.current_conversation['title']}")
+    st.caption(
+        f"{len(st.session_state.conversation_messages)} messages · "
+        f"{len(st.session_state.current_tables)} selected table(s)"
+    )
+
+    if st.session_state.conversation_messages:
+        for msg in st.session_state.conversation_messages:
+            if msg["role"] == "user":
+                with st.chat_message("user"):
+                    st.write(msg["content"])
+            else:
+                with st.chat_message("assistant"):
+                    st.write(msg["content"])
+                    if msg.get("query_sql"):
+                        with st.expander("🔍 View SQL"):
+                            st.code(msg["query_sql"], language="sql")
+                    if msg.get("result_json"):
+                        with st.expander("📊 View Results"):
+                            results = json.loads(msg["result_json"])
+                            st.dataframe(results, use_container_width=True)
+    else:
+        st.info("Start the chat by asking a question or using one of the dataset suggestions below.")
+
+    st.markdown("---")
+    st.markdown("### 🤖 Suggested Questions")
+    if user_tables:
+        table_names = [table["table_name"] for table in user_tables]
+        suggestions, _ = generate_example_questions(table_names)
+        buttons = st.columns(len(suggestions) if suggestions else 1)
+        for idx, suggestion in enumerate(suggestions):
+            if buttons[idx].button(suggestion, key=f"suggestion_{idx}"):
+                error = submit_question(suggestion)
+                if error:
+                    st.error(error)
+                else:
+                    st.experimental_rerun()
+    else:
+        st.info("Upload a dataset to see AI-generated suggestions.")
+
+    st.markdown("---")
+    st.markdown("### ✍️ Ask a Question")
+    question = st.text_area("Enter your question here", height=120, key="chat_input")
+    st.markdown("*Ask anything about the uploaded dataset. Your answer appears in the same chat flow.*")
+    if st.button("🚀 Send", use_container_width=True, type="primary", key="send_chat"):
+        error = submit_question(question)
+        if error:
+            st.error(error)
+        else:
+            st.experimental_rerun()
 
 
 # ==================== MAIN APP ====================
 
 def main():
     """Main application flow"""
-    
     if not st.session_state.user:
         show_auth_page()
     else:
         show_sidebar()
-        
-        # Navigation tabs
-        nav_col1, nav_col2, nav_col3, nav_col4 = st.columns(4)
-        
-        with nav_col1:
-            if st.button("💬 Chat", use_container_width=True):
-                st.session_state.page = "chat"
-        with nav_col2:
-            if st.button("📤 Upload", use_container_width=True):
-                st.session_state.page = "upload"
-        with nav_col3:
-            if st.button("📜 History", use_container_width=True):
-                st.session_state.page = "history"
-        with nav_col4:
-            if st.button("⚙️ Settings", use_container_width=True):
-                st.session_state.page = "settings"
-        
-        st.divider()
-        
-        # Page routing
-        page = st.session_state.get("page", "chat")
-        
-        if page == "chat":
-            show_chat_interface()
-        elif page == "upload":
-            show_upload_page()
-        elif page == "history":
-            show_history_page()
-        elif page == "settings":
-            st.markdown("## ⚙️ Settings")
-            st.info("Settings coming soon!")
+        show_workspace()
 
 
 if __name__ == "__main__":
