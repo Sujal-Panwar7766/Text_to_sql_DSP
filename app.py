@@ -445,7 +445,7 @@ def render_upload_section(user_tables):
                 st.session_state.upload_summary = upload_summary
                 st.success("✅ Upload completed successfully!")
                 save_workspace_state()
-                st.experimental_rerun()
+                st.rerun()
 
     if st.session_state.get("upload_summary"):
         st.markdown("### Upload Status")
@@ -454,21 +454,32 @@ def render_upload_section(user_tables):
     if user_tables:
         st.markdown("### Uploaded Datasets")
         summary_table = pd.DataFrame(user_tables)
-        summary_table = summary_table.rename(
-            columns={
-                "source_filename": "Source File",
-                "table_name": "Table Name",
-                "row_count": "Rows",
-                "column_count": "Columns",
-                "created_at": "Uploaded At",
-            }
-        )
-        st.dataframe(summary_table["Source File Table Name Rows Columns Uploaded At".split()], use_container_width=True)
+        display_column_sources = {
+            "Source File": ["source_filename", "filename", "file_name"],
+            "Table Name": ["table_name", "table"],
+            "Rows": ["row_count", "rows"],
+            "Columns": ["column_count", "columns"],
+            "Uploaded At": ["created_at", "uploaded_at"],
+        }
+        display_table = pd.DataFrame(index=summary_table.index)
+
+        for display_name, source_columns in display_column_sources.items():
+            matching_columns = [column for column in source_columns if column in summary_table.columns]
+            if not matching_columns:
+                display_table[display_name] = ""
+                continue
+
+            merged_series = summary_table[matching_columns[0]]
+            for column in matching_columns[1:]:
+                merged_series = merged_series.fillna(summary_table[column])
+            display_table[display_name] = merged_series
+
+        st.dataframe(display_table, use_container_width=True)
 
         totals = {
             "tables": len(user_tables),
-            "total_rows": sum(t["row_count"] for t in user_tables),
-            "total_columns": sum(t["column_count"] for t in user_tables),
+            "total_rows": sum(t.get("row_count", t.get("rows", 0)) or 0 for t in user_tables),
+            "total_columns": sum(t.get("column_count", t.get("columns", 0)) or 0 for t in user_tables),
         }
         col_a, col_b, col_c = st.columns(3)
         col_a.metric("Tables", totals["tables"])
@@ -536,7 +547,7 @@ def show_workspace():
                 if error:
                     st.error(error)
                 else:
-                    st.experimental_rerun()
+                    st.rerun()
     else:
         st.info("Upload a dataset to see AI-generated suggestions.")
 
@@ -549,7 +560,7 @@ def show_workspace():
         if error:
             st.error(error)
         else:
-            st.experimental_rerun()
+            st.rerun()
 
 
 # ==================== MAIN APP ====================
