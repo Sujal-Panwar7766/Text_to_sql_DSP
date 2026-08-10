@@ -313,6 +313,44 @@ def create_or_get_active_conversation():
     return st.session_state.current_conversation
 
 
+def format_answer_value(value):
+    if pd.isna(value):
+        return "null"
+    if isinstance(value, float):
+        return f"{value:,.2f}".rstrip("0").rstrip(".")
+    return str(value)
+
+
+def build_assistant_response(result_df, summary):
+    if result_df is None or result_df.empty:
+        return "No matching rows found."
+
+    columns = list(result_df.columns)
+    row_count = len(result_df)
+
+    if row_count == 1 and len(columns) == 1:
+        return f"Answer: {format_answer_value(result_df.iloc[0, 0])}"
+
+    if row_count == 1 and len(columns) <= 4:
+        details = ", ".join(
+            f"{column.replace('_', ' ').title()}: {format_answer_value(result_df.iloc[0][column])}"
+            for column in columns
+        )
+        return f"Answer: {details}"
+
+    if len(columns) == 2 and row_count <= 5:
+        preview_lines = "\n".join(
+            f"{format_answer_value(row[columns[0]])}: {format_answer_value(row[columns[1]])}"
+            for _, row in result_df.iterrows()
+        )
+        return f"{summary}\n\nTop results:\n{preview_lines}"
+
+    if summary and not summary.startswith("Query returned"):
+        return f"{summary}\n\nReturned {row_count} rows."
+
+    return f"Returned {row_count} rows with {len(columns)} columns."
+
+
 def submit_question(question):
     if not question:
         return "Please enter a question"
@@ -364,19 +402,9 @@ def submit_question(question):
         return result
 
     result_df = pd.DataFrame(result)
-    result_json = result_df.to_json()
+    result_json = result_df.to_json(orient="records")
     summary, _ = generate_result_summary(result_df, question, st.session_state.current_tables)
-
-    response = f"""
-**SQL Generated:**
-```sql
-{sql}
-```
-
-**Results:** {len(result_df)} rows returned
-
-**Summary:** {summary}
-"""
+    response = build_assistant_response(result_df, summary)
 
     add_message(
         st.session_state.current_conversation["id"],
@@ -499,8 +527,14 @@ def show_workspace():
     create_or_get_active_conversation()
 
     user_tables = get_user_tables(st.session_state.user["id"])
-    if user_tables and not st.session_state.current_tables:
-        st.session_state.current_tables = [user_tables[0]["table_name"]]
+    available_table_names = [table["table_name"] for table in user_tables]
+    current_selection = [
+        table_name for table_name in st.session_state.current_tables
+        if table_name in available_table_names
+    ]
+    if available_table_names and not current_selection:
+        current_selection = [available_table_names[0]]
+    st.session_state.current_tables = current_selection
 
     render_upload_section(user_tables)
 

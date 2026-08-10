@@ -157,6 +157,22 @@ def format_result_context(result_df, max_rows=10):
     return "\n".join(lines)
 
 
+def format_value_for_answer(value):
+    if value is None:
+        return "null"
+
+    try:
+        if value != value:
+            return "null"
+    except Exception:
+        pass
+
+    if isinstance(value, float):
+        return f"{value:,.2f}".rstrip("0").rstrip(".")
+
+    return str(value)
+
+
 def generate_rule_based_sql(user_question, table_names):
     """Fallback SQL generation when Groq is unavailable."""
     normalized_tables = normalize_table_names(table_names)
@@ -267,8 +283,10 @@ RULES:
 6. Use AVG() for average questions.
 7. Use GROUP BY for per-category aggregations.
 8. Use ORDER BY with LIMIT only when the user explicitly asks for top N, bottom N, first N, or a single best or worst record.
-9. If multiple tables are needed, only join them when a shared column clearly exists in the schemas.
-10. Always end the query with a semicolon.
+9. For highest, lowest, top, bottom, best, or worst questions, include both the identifying columns and the ranking metric in the SELECT list.
+10. For "by category" questions, include the category column and the aggregate value.
+11. If multiple tables are needed, only join them when a shared column clearly exists in the schemas.
+12. Always end the query with a semicolon.
 
 User question: {user_question}
 
@@ -278,7 +296,7 @@ SQL:"""
         "You write precise SQLite SELECT queries and return only SQL.",
         prompt,
         max_tokens=300,
-        temperature=0.1,
+        temperature=0,
     )
     if error:
         return generate_rule_based_sql(user_question, normalized_tables)
@@ -402,7 +420,7 @@ def generate_result_summary(result_df, user_question, table_names):
     result_context = format_result_context(result_df)
     table_scope = ", ".join(normalize_table_names(table_names))
 
-    prompt = f"""Summarize this SQLite query result in at most 2 short sentences.
+    prompt = f"""Answer the user's SQLite question using only the query result.
 
 User question:
 {user_question}
@@ -414,16 +432,17 @@ Result:
 {result_context}
 
 RULES:
-1. Focus on what the result shows.
-2. Do not explain SQL mechanics.
-3. Be short and direct.
+1. Return at most 2 short sentences.
+2. Mention the exact values shown in the result when possible.
+3. Focus on the answer, not SQL mechanics.
+4. Do not guess beyond the result rows provided.
 """
 
     raw_text, error = run_ai_task(
-        "You summarize SQL query results for end users in plain English.",
+        "You answer data questions using only the provided SQL result. Be direct and factual.",
         prompt,
         max_tokens=120,
-        temperature=0.2,
+        temperature=0,
     )
     if error or not raw_text:
         num_rows = len(result_df)
