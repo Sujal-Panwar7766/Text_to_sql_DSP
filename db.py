@@ -566,7 +566,8 @@ def insert_data(df, user_id, source_name=None):
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Clean column names
+    # Clean column names and handle non-string column headers
+    df.columns = [str(col) for col in df.columns]
     df.columns = [re.sub(r'[^a-zA-Z0-9_]', '_', col.strip().lower()) for col in df.columns]
     df.columns = [f"col_{col}" if col[0].isdigit() else col for col in df.columns]
 
